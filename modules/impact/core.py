@@ -358,9 +358,11 @@ def enhance_detail(image, model, clip, vae, guide_size, guide_size_for_bbox, max
 
         refined_latent = latent_image
 
-        sampler_opt=None
+        sampler_opt = None
+        sigmas_opt = None
         if detailer_hook is not None:
             sampler_opt = detailer_hook.get_custom_sampler()
+            sigmas_opt = detailer_hook.get_custom_sigmas()
 
         # ksampler
         for i in range(0, cycle):
@@ -382,7 +384,7 @@ def enhance_detail(image, model, clip, vae, guide_size, guide_size_for_bbox, max
 
             refined_latent = impact_sampling.ksampler_wrapper(model2, seed2, steps2, cfg2, sampler_name2, scheduler2, positive2, negative2,
                                                               refined_latent, denoise2, refiner_ratio, refiner_model, refiner_clip, refiner_positive, refiner_negative,
-                                                              noise=noise, scheduler_func=scheduler_func, sampler_opt=sampler_opt)
+                                                              noise=noise, scheduler_func=scheduler_func, sampler_opt=sampler_opt, sigmas_opt=sigmas_opt)
 
         if detailer_hook is not None:
             refined_latent = detailer_hook.pre_decode(refined_latent)
@@ -540,15 +542,17 @@ def enhance_detail_for_animatediff(image_frames, model, clip, vae, guide_size, g
     }
 
 
-    sampler_opt=None
+    sampler_opt = None
+    sigmas_opt = None
     if detailer_hook is not None:
         sampler_opt = detailer_hook.get_custom_sampler()
+        sigmas_opt = detailer_hook.get_custom_sigmas()
 
     if detailer_hook is not None:
         latent = detailer_hook.post_encode(latent)
 
     refined_latent = impact_sampling.ksampler_wrapper(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                                      latent, denoise, refiner_ratio, refiner_model, refiner_clip, refiner_positive, refiner_negative, scheduler_func=scheduler_func, sampler_opt=sampler_opt)
+                                                      latent, denoise, refiner_ratio, refiner_model, refiner_clip, refiner_positive, refiner_negative, scheduler_func=scheduler_func, sampler_opt=sampler_opt, sigmas_opt=sigmas_opt)
 
     if detailer_hook is not None:
         refined_latent = detailer_hook.pre_decode(refined_latent)
