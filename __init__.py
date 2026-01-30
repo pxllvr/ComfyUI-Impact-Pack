@@ -80,6 +80,7 @@ NODE_CLASS_MAPPINGS = {
     "SAMDetectorSegmented": SAMDetectorSegmented, # noqa: F405
 
     "FaceDetailer": FaceDetailer, # noqa: F405
+    "FaceDetailerAdvanced": FaceDetailerAdvanced,
     "FaceDetailerPipe": FaceDetailerPipe, # noqa: F405
     "MaskDetailerPipe": MaskDetailerPipe, # noqa: F405
 
@@ -338,6 +339,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SAMDetectorCombined": "SAMDetector (combined)",
     "SAMDetectorSegmented": "SAMDetector (segmented)",
     "FaceDetailerPipe": "FaceDetailer (pipe)",
+    "FaceDetailerAdvanced": "FaceDetailer (Advanced)",
     "MaskDetailerPipe": "MaskDetailer (pipe)",
 
     "FromDetailerPipeSDXL": "FromDetailer (SDXL/pipe)",
