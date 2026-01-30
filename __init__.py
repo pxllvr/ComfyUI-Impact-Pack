@@ -292,6 +292,7 @@ NODE_CLASS_MAPPINGS = {
     "ImpactSEGSClassify": SEGS_Classify, # noqa: F405
 
     "ImpactSchedulerAdapter": ImpactSchedulerAdapter, # noqa: F405
+    # "ImpactSamplerAdapter": ImpactSamplerAdapter, # noqa: F405  # COMMENTED OUT - Class not defined
     "GITSSchedulerFuncProvider": GITSSchedulerFuncProvider # noqa: F405
 }
 
@@ -443,6 +444,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SEGSPreviewCNet": "SEGSPreview (CNET Image)",
 
     "ImpactSchedulerAdapter": "Impact Scheduler Adapter",
+    # "ImpactSamplerAdapter": "Impact Sampler Adapter",  # COMMENTED OUT - Class not defined
     "GITSSchedulerFuncProvider": "GITSScheduler Func Provider",
     "ImpactNegativeConditioningPlaceholder": "Negative Cond Placeholder"
 }
