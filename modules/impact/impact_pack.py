@@ -3,7 +3,6 @@ import sys
 
 import comfy.samplers
 import comfy.sd
-import comfy.sample
 import warnings
 from segment_anything import sam_model_registry
 from io import BytesIO
@@ -34,7 +33,6 @@ import torch
 import nodes
 import cv2
 import logging
-import impact.impact_sampling as impact_sampling
 
 
 try:
@@ -895,6 +893,10 @@ class FaceDetailer:
 
 
 class FaceDetailerAdvanced:
+    """
+    FaceDetailer with optional SAMPLER and SIGMAS inputs for custom sampling (RES4LYF, etc).
+    Connect ClownSampler output to 'sampler' and BasicScheduler output to 'sigmas'.
+    """
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
@@ -903,7 +905,7 @@ class FaceDetailerAdvanced:
                      "clip": ("CLIP",),
                      "vae": ("VAE",),
                      "guide_size": ("FLOAT", {"default": 512, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 8}),
-                     "guide_size_for_bbox": ("BOOLEAN", {"default": True, "label_on": "bbox", "label_off": "crop_region"}),
+                     "guide_size_for": ("BOOLEAN", {"default": True, "label_on": "bbox", "label_off": "crop_region"}),
                      "max_size": ("FLOAT", {"default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 8}),
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
@@ -936,8 +938,6 @@ class FaceDetailerAdvanced:
                      "cycle": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
                      },
                 "optional": {
-                    "sampler": ("SAMPLER",),  # New: Custom sampler input
-                    "sigmas": ("SIGMAS",),    # New: Custom sigmas input
                     "sam_model_opt": ("SAM_MODEL", ),
                     "segm_detector_opt": ("SEGM_DETECTOR", ),
                     "detailer_hook": ("DETAILER_HOOK",),
@@ -946,6 +946,8 @@ class FaceDetailerAdvanced:
                     "scheduler_func_opt": ("SCHEDULER_FUNC",),
                     "tiled_encode": ("BOOLEAN", {"default": False, "label_on": "enabled", "label_off": "disabled"}),
                     "tiled_decode": ("BOOLEAN", {"default": False, "label_on": "enabled", "label_off": "disabled"}),
+                    "sampler": ("SAMPLER", {"tooltip": "Custom sampler from ClownSampler, etc. Overrides sampler_name."}),
+                    "sigmas": ("SIGMAS", {"tooltip": "Custom sigmas from BasicScheduler, etc. Overrides scheduler/steps."}),
                 }}
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "MASK", "DETAILER_PIPE", "IMAGE")
@@ -955,225 +957,24 @@ class FaceDetailerAdvanced:
 
     CATEGORY = "ImpactPack/Simple"
 
-    DESCRIPTION = FaceDetailer.DESCRIPTION + "\n(Advanced version with optional sampler and sigmas inputs for custom scheduling from packs like RES4LYF.)"
+    DESCRIPTION = "FaceDetailer with optional SAMPLER and SIGMAS inputs for custom sampling from RES4LYF and other packs. Connect ClownSampler to 'sampler' and BasicScheduler to 'sigmas'."
 
-    @staticmethod
-    def enhance_face(image, model, clip, vae, guide_size, guide_size_for_bbox, max_size, seed, steps, cfg, sampler_name, scheduler,
-                     positive, negative, denoise, feather, noise_mask, force_inpaint,
-                     bbox_threshold, bbox_dilation, bbox_crop_factor,
-                     sam_detection_hint, sam_dilation, sam_threshold, sam_bbox_expansion, sam_mask_hint_threshold,
-                     sam_mask_hint_use_negative, drop_size,
-                     bbox_detector, segm_detector=None, sam_model_opt=None, wildcard=None, detailer_hook=None,
-                     refiner_ratio=None, refiner_model=None, refiner_clip=None, refiner_positive=None, refiner_negative=None, cycle=1,
-                     inpaint_model=False, noise_mask_feather=0, scheduler_func_opt=None, tiled_encode=False, tiled_decode=False,
-                     sampler=None, sigmas=None):  # Added sampler and sigmas
+    def doit(self, image, model, clip, vae, guide_size, guide_size_for, max_size, seed, steps, cfg, sampler_name, scheduler,
+             positive, negative, denoise, feather, noise_mask, force_inpaint,
+             bbox_threshold, bbox_dilation, bbox_crop_factor,
+             sam_detection_hint, sam_dilation, sam_threshold, sam_bbox_expansion, sam_mask_hint_threshold,
+             sam_mask_hint_use_negative, drop_size, bbox_detector, wildcard, cycle=1,
+             sam_model_opt=None, segm_detector_opt=None, detailer_hook=None, inpaint_model=False, noise_mask_feather=0,
+             scheduler_func_opt=None, tiled_encode=False, tiled_decode=False,
+             sampler=None, sigmas=None):
 
-        bbox_detector.setAux('face')
-        segs = bbox_detector.detect(image, bbox_threshold, bbox_dilation, bbox_crop_factor, drop_size, detailer_hook=detailer_hook)
-        bbox_detector.setAux(None)
-
-        # bbox + sam combination
-        if sam_model_opt is not None:
-            sam_mask = core.make_sam_mask(sam_model_opt, segs, image, sam_detection_hint, sam_dilation,
-                                          sam_threshold, sam_bbox_expansion, sam_mask_hint_threshold,
-                                          sam_mask_hint_use_negative)
-            segs = core.segs_bitwise_and_mask(segs, sam_mask)
-
-        elif segm_detector is not None:
-            segm_segs = segm_detector.detect(image, bbox_threshold, bbox_dilation, bbox_crop_factor, drop_size)
-
-            if (hasattr(segm_detector, 'override_bbox_by_segm') and segm_detector.override_bbox_by_segm and
-                    not (detailer_hook is not None and not hasattr(detailer_hook, 'override_bbox_by_segm'))):
-                segs = segm_segs
+        # If custom sampler/sigmas provided, create a hook and combine with existing
+        if sampler is not None:
+            custom_hook = hooks.CustomSamplerSigmasDetailerHookProvider(sampler, sigmas)
+            if detailer_hook is not None:
+                detailer_hook = hooks.DetailerHookCombine(custom_hook, detailer_hook)
             else:
-                segm_mask = core.segs_to_combined_mask(segm_segs)
-                segs = core.segs_bitwise_and_mask(segs, segm_mask)
-
-        enhanced_img = image.clone()
-        enhanced_cropped = []
-        enhanced_cropped_alpha = []
-        cnet_pil_list = []
-
-        if len(segs[1]) == 0:
-            return image, enhanced_cropped, enhanced_cropped_alpha, None, cnet_pil_list
-
-        segs = core.segs_scale_match(segs, image.shape)
-        new_segs = []
-
-        wildcard_concat_mode = None
-        if wildcard is not None:
-            if wildcard.startswith('[CONCAT]'):
-                wildcard_concat_mode = 'concat'
-                wildcard = wildcard[8:]
-            wmode, wildcard_chooser = wildcards.process_wildcard_for_segs(wildcard)
-        else:
-            wmode, wildcard_chooser = None, None
-
-        if wmode in ['ASC', 'DSC', 'ASC-SIZE', 'DSC-SIZE']:
-            if wmode == 'ASC':
-                ordered_segs = sorted(segs[1], key=lambda x: (x.bbox[0], x.bbox[1]))
-            elif wmode == 'DSC':
-                ordered_segs = sorted(segs[1], key=lambda x: (x.bbox[0], x.bbox[1]), reverse=True)
-            elif wmode == 'ASC-SIZE':
-                ordered_segs = sorted(segs[1], key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]))
-            else:  # 'DSC-SIZE'
-                ordered_segs = sorted(segs[1], key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
-        else:
-            ordered_segs = segs[1]
-
-        if not (isinstance(model, str) and model == "DUMMY") and noise_mask_feather > 0 and 'denoise_mask_function' not in model.model_options:
-            model = nodes_differential_diffusion.DifferentialDiffusion().execute(model)[0]
-
-        for i, seg in enumerate(ordered_segs):
-            cropped_image = utils.crop_ndarray4(image.cpu().numpy(), seg.crop_region)
-            cropped_image = utils.to_tensor(cropped_image)
-            mask = utils.to_tensor(seg.cropped_mask)
-            mask = utils.tensor_gaussian_blur_mask(mask, feather)
-
-            is_mask_all_zeros = (seg.cropped_mask == 0).all().item()
-            if is_mask_all_zeros:
-                logging.info("Detailer: segment skip [empty mask]")
-                continue
-
-            if noise_mask:
-                cropped_mask = seg.cropped_mask
-            else:
-                cropped_mask = None
-
-            if wildcard_chooser is not None and wmode != "LAB":
-                seg_seed, wildcard_item = wildcard_chooser.get(seg)
-            elif wildcard_chooser is not None and wmode == "LAB":
-                seg_seed, wildcard_item = None, wildcard_chooser.get(seg)
-            else:
-                seg_seed, wildcard_item = None, None
-
-            seg_seed = seed + i if seg_seed is None else seg_seed
-
-            if not isinstance(positive, str):
-                cropped_positive = [
-                    [condition, {
-                        k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
-                        for k, v in details.items()
-                    }]
-                    for condition, details in positive
-                ]
-            else:
-                cropped_positive = positive
-
-            if not isinstance(negative, str):
-                cropped_negative = [
-                    [condition, {
-                        k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
-                        for k, v in details.items()
-                    }]
-                    for condition, details in negative
-                ]
-            else:
-                cropped_negative = negative
-
-            if wildcard_item and wildcard_item.strip() == '[SKIP]':
-                continue
-
-            if wildcard_item and wildcard_item.strip() == '[STOP]':
-                break
-
-            orig_cropped_image = cropped_image.clone()
-
-            # Custom sampling logic (replacing core.enhance_detail call)
-            if isinstance(model, str) and model == "DUMMY":
-                enhanced_cropped_seg = cropped_image
-                cnet_pils = None
-            else:
-                latent = vae.encode(orig_cropped_image)  # Encode to latent
-
-                # NEW: Standardize latent format (handles if VAE returns tensor instead of dict)
-                if not isinstance(latent, dict) or 'samples' not in latent:
-                    latent = {'samples': latent}  # Wrap tensor as dict
-
-                # Fallback if optional inputs not provided
-                if sampler is None and sigmas is None:
-                    # Use original Impact-Pack wrapper for compatibility with Z-Image
-                    refined_latent = impact_sampling.ksampler_wrapper(
-                        model,
-                        seg_seed,
-                        steps,
-                        cfg,
-                        sampler_name,
-                        scheduler,
-                        cropped_positive,
-                        cropped_negative,
-                        latent,  # Pass standardized latent dict
-                        denoise=denoise,
-                        refiner_ratio=refiner_ratio,
-                        refiner_model=refiner_model,
-                        refiner_clip=refiner_clip,
-                        refiner_positive=refiner_positive,
-                        refiner_negative=refiner_negative,
-                        scheduler_func=scheduler_func_opt
-                    )
-                else:
-                    if sampler is None:
-                        sampler = comfy.samplers.sampler_object(sampler_name)
-                    if sigmas is None:
-                        sigmas = comfy.samplers.calculate_sigmas(model.model.model_sampling, scheduler, steps).to(model.device)
-
-                    noise = comfy.utils.generate_noise(latent['samples'], seg_seed)
-
-                    refined_latent = comfy.sample.sample(
-                        model,
-                        noise,
-                        cropped_positive,
-                        cropped_negative,
-                        cfg,
-                        model.device,
-                        sampler,
-                        sigmas,
-                        model.model_options,
-                        latent['samples'],
-                        steps,
-                        denoise=denoise,
-                        disable_pbar=False
-                    )
-
-                # Decode
-                enhanced_cropped_seg = vae.decode(refined_latent['samples'])
-                cnet_pils = None  # Placeholder; if you need ControlNet PILs, copy logic from core.enhance_detail if available
-
-            if cnet_pils is not None:
-                cnet_pil_list.extend(cnet_pils)
-
-            if enhanced_cropped_seg is not None:
-                image = image.cpu()
-                enhanced_cropped_seg = enhanced_cropped_seg.cpu()
-                utils.tensor_paste(image, enhanced_cropped_seg, (seg.crop_region[0], seg.crop_region[1]), mask)
-
-                if detailer_hook is not None:
-                    image = detailer_hook.post_paste(image)
-
-            enhanced_cropped.append(enhanced_cropped_seg)
-            enhanced_cropped_alpha.append(utils.tensor_convert_rgba(enhanced_cropped_seg))  # Simplified alpha
-
-            new_seg = SEG(enhanced_cropped_seg.numpy(), seg.cropped_mask, seg.confidence, seg.crop_region, seg.bbox, seg.label, seg.control_net_wrapper)
-            new_segs.append(new_seg)
-
-        # Fallbacks for empty lists
-        if len(enhanced_cropped) == 0:
-            enhanced_cropped = [utils.empty_pil_tensor()]
-
-        if len(enhanced_cropped_alpha) == 0:
-            enhanced_cropped_alpha = [utils.empty_pil_tensor()]
-
-        if len(cnet_pil_list) == 0:
-            cnet_pil_list = [utils.empty_pil_tensor()]
-
-        mask = core.segs_to_combined_mask(segs)
-        return image, enhanced_cropped, enhanced_cropped_alpha, mask, cnet_pil_list
-
-    def doit(self, *args, **kwargs):
-        sampler = kwargs.pop('sampler', None)
-        sigmas = kwargs.pop('sigmas', None)
-        original_seed = kwargs.pop('seed')  # Pop seed to avoid duplicate in **kwargs
-        image_batch = kwargs.pop('image')  # Pop 'image' to avoid duplicate when passing single_image
+                detailer_hook = custom_hook
 
         result_img = None
         result_mask = None
@@ -1181,12 +982,18 @@ class FaceDetailerAdvanced:
         result_cropped_enhanced_alpha = []
         result_cnet_images = []
 
-        if len(image_batch) > 1:
-            logging.warning("[Impact Pack] WARN: FaceDetailerAdvanced is not designed for video detailing. Use Detailer For AnimateDiff for videos.")
+        if len(image) > 1:
+            logging.warning("[Impact Pack] WARN: FaceDetailerAdvanced is not designed for video. Use Detailer For AnimateDiff.")
 
-        for i, single_image in enumerate(image_batch):
-            enhanced_img, cropped_enhanced, cropped_enhanced_alpha, mask, cnet_pil_list = FaceDetailerAdvanced.enhance_face(
-                single_image.unsqueeze(0), **kwargs, sampler=sampler, sigmas=sigmas, seed=original_seed + i)
+        for i, single_image in enumerate(image):
+            enhanced_img, cropped_enhanced, cropped_enhanced_alpha, mask, cnet_pil_list = FaceDetailer.enhance_face(
+                single_image.unsqueeze(0), model, clip, vae, guide_size, guide_size_for, max_size, seed + i, steps, cfg, sampler_name, scheduler,
+                positive, negative, denoise, feather, noise_mask, force_inpaint,
+                bbox_threshold, bbox_dilation, bbox_crop_factor,
+                sam_detection_hint, sam_dilation, sam_threshold, sam_bbox_expansion, sam_mask_hint_threshold,
+                sam_mask_hint_use_negative, drop_size, bbox_detector, segm_detector_opt, sam_model_opt, wildcard, detailer_hook,
+                cycle=cycle, inpaint_model=inpaint_model, noise_mask_feather=noise_mask_feather, scheduler_func_opt=scheduler_func_opt,
+                tiled_encode=tiled_encode, tiled_decode=tiled_decode)
 
             result_img = torch.cat((result_img, enhanced_img), dim=0) if result_img is not None else enhanced_img
             result_mask = torch.cat((result_mask, mask), dim=0) if result_mask is not None else mask
@@ -1194,8 +1001,7 @@ class FaceDetailerAdvanced:
             result_cropped_enhanced_alpha.extend(cropped_enhanced_alpha)
             result_cnet_images.extend(cnet_pil_list)
 
-        pipe = (kwargs['model'], kwargs['clip'], kwargs['vae'], kwargs['positive'], kwargs['negative'], kwargs.get('wildcard', None), kwargs['bbox_detector'], kwargs.get('segm_detector_opt', None), kwargs.get('sam_model_opt', None), kwargs.get('detailer_hook', None), None, None, None, None)
-
+        pipe = (model, clip, vae, positive, negative, wildcard, bbox_detector, segm_detector_opt, sam_model_opt, detailer_hook, None, None, None, None)
         return result_img, result_cropped_enhanced, result_cropped_enhanced_alpha, result_mask, pipe, result_cnet_images
 
 
@@ -1382,6 +1188,30 @@ class CustomSamplerDetailerHookProvider:
 
     def doit(self, sampler):
         hook = hooks.CustomSamplerDetailerHookProvider(sampler)
+        return (hook, )
+
+
+class CustomSamplerSigmasDetailerHookProvider:
+    """Hook provider for custom sampler AND sigmas from packs like RES4LYF."""
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "sampler": ("SAMPLER", {"tooltip": "Custom sampler from ClownSampler, etc."}),
+                    },
+                "optional": {
+                    "sigmas": ("SIGMAS", {"tooltip": "Custom sigmas from BasicScheduler, etc."}),
+                    },
+                }
+
+    RETURN_TYPES = ("DETAILER_HOOK",)
+    FUNCTION = "doit"
+
+    CATEGORY = "ImpactPack/Detailer"
+
+    DESCRIPTION = "Apply a hook for custom sampler AND sigmas (from RES4LYF, etc). Connect ClownSampler to 'sampler' and BasicScheduler to 'sigmas'."
+
+    def doit(self, sampler, sigmas=None):
+        hook = hooks.CustomSamplerSigmasDetailerHookProvider(sampler, sigmas)
         return (hook, )
 
 
