@@ -116,6 +116,12 @@ class DetailerHookCombine(PixelKSampleHookCombine):
         else:
             return self.hook2.get_custom_sampler()
 
+    def get_custom_sigmas(self):
+        if self.hook1.get_custom_sigmas() is not None:
+            return self.hook1.get_custom_sigmas()
+        else:
+            return self.hook2.get_custom_sigmas()
+
     def get_skip_sampling(self):
         return self.hook1.get_skip_sampling() and self.hook2.get_skip_sampling()
     
@@ -189,6 +195,9 @@ class DetailerHook(PixelKSampleHook):
     def get_custom_sampler(self):
         return None
 
+    def get_custom_sigmas(self):
+        return None
+
     def get_skip_sampling(self):
         return False
     
@@ -203,6 +212,20 @@ class CustomSamplerDetailerHookProvider(DetailerHook):
 
     def get_custom_sampler(self):
         return self.sampler
+
+
+class CustomSamplerSigmasDetailerHookProvider(DetailerHook):
+    """Hook provider for custom sampler AND sigmas from packs like RES4LYF."""
+    def __init__(self, sampler, sigmas=None):
+        super().__init__()
+        self.sampler = sampler
+        self.sigmas = sigmas
+
+    def get_custom_sampler(self):
+        return self.sampler
+
+    def get_custom_sigmas(self):
+        return self.sigmas
 
 
 # class CustomNoiseDetailerHookProvider(DetailerHook):
